@@ -1,0 +1,276 @@
+{
+  "name": "Automatic Job Vacancy Recommender System",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 0 * * *"
+            }
+          ]
+        }
+      },
+      "id": "36d15c75-9756-4aef-aa0d-a8788971fc32",
+      "name": "Cron Diario",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        256,
+        1200
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n  id AS user_id,\n  email,\n  full_name\nFROM users\nWHERE is_active = 1;",
+        "options": {}
+      },
+      "id": "f812b386-203d-4a73-a740-51672601c1e9",
+      "name": "Get Active Users",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.5,
+      "position": [
+        480,
+        1200
+      ],
+      "credentials": {
+        "mySql": {
+          "id": "d3hob99pd8ZamK2v",
+          "name": "MySQL account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "batchSize": "=1",
+        "options": {}
+      },
+      "id": "a9f1306a-860b-4293-b6fb-738117db15aa",
+      "name": "Split In Batches",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        704,
+        1200
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n  p.user_id,\n  p.skills\nFROM profiles p\nWHERE p.user_id = {{ $json.user_id }};",
+        "options": {}
+      },
+      "id": "1d6ecad5-e656-4038-ba28-95b9e71223b5",
+      "name": "Get Profile Skilss",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.5,
+      "position": [
+        928,
+        1200
+      ],
+      "credentials": {
+        "mySql": {
+          "id": "d3hob99pd8ZamK2v",
+          "name": "MySQL account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n  {{ $json.user_id }} AS user_id,\n  j.id AS job_id,\n\n  /* matched_skills */\n  (\n    SELECT COUNT(*)\n    FROM JSON_TABLE(\n      CASE\n        WHEN JSON_VALID(j.skills_required) THEN CAST(j.skills_required AS JSON)\n        ELSE JSON_ARRAY()\n      END,\n      '$[*]' COLUMNS (skill VARCHAR(64) PATH '$')\n    ) req\n    WHERE req.skill IN (\n      SELECT us.skill\n      FROM profiles p\n      JOIN JSON_TABLE(\n        CASE\n          WHEN JSON_VALID(p.skills) THEN CAST(p.skills AS JSON)\n          ELSE JSON_ARRAY()\n        END,\n        '$[*]' COLUMNS (skill VARCHAR(64) PATH '$')\n      ) us\n      WHERE p.user_id = {{ $json.user_id }}\n    )\n  ) AS score,\n\n  /* explanation: Matched X/Y */\n  CONCAT(\n    'Matched ',\n    (\n      SELECT COUNT(*)\n      FROM JSON_TABLE(\n        CASE\n          WHEN JSON_VALID(j.skills_required) THEN CAST(j.skills_required AS JSON)\n          ELSE JSON_ARRAY()\n        END,\n        '$[*]' COLUMNS (skill VARCHAR(64) PATH '$')\n      ) req2\n      WHERE req2.skill IN (\n        SELECT us2.skill\n        FROM profiles p2\n        JOIN JSON_TABLE(\n          CASE\n            WHEN JSON_VALID(p2.skills) THEN CAST(p2.skills AS JSON)\n            ELSE JSON_ARRAY()\n          END,\n          '$[*]' COLUMNS (skill VARCHAR(64) PATH '$')\n        ) us2\n        WHERE p2.user_id = {{ $json.user_id }}\n      )\n    ),\n    '/',\n    JSON_LENGTH(\n      CASE\n        WHEN JSON_VALID(j.skills_required) THEN CAST(j.skills_required AS JSON)\n        ELSE JSON_ARRAY()\n      END\n    ),\n    ' skills'\n  ) AS explanation\n\nFROM jobs j\n/* filtro opcional por recencia */\nWHERE j.created_at >= NOW() - INTERVAL 90 DAY\nORDER BY score DESC, j.posted_at DESC, j.id DESC\nLIMIT 5;",
+        "options": {}
+      },
+      "id": "1f6216d1-219d-4fb2-b121-d5d1268a8772",
+      "name": "Compute Top 5 matches (score + explicación)",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.5,
+      "position": [
+        1184,
+        1184
+      ],
+      "credentials": {
+        "mySql": {
+          "id": "d3hob99pd8ZamK2v",
+          "name": "MySQL account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO job_matches (user_id, job_id, score, explanation, run_date, created_at)\nVALUES (\n  {{ $json.user_id }},\n  {{ $json.job_id }},\n  {{ $json.score }},\n  '{{ $json.explanation.replaceAll(\"'\", \"''\") }}',\n  CURDATE(),\n  NOW()\n)\nON DUPLICATE KEY UPDATE\n  score = VALUES(score),\n  explanation = VALUES(explanation),\n  created_at = VALUES(created_at);",
+        "options": {}
+      },
+      "id": "6840fb24-f615-491d-ae1e-4e9a03fe833e",
+      "name": "Insert results into job_matches",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.5,
+      "position": [
+        1424,
+        1184
+      ],
+      "credentials": {
+        "mySql": {
+          "id": "d3hob99pd8ZamK2v",
+          "name": "MySQL account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO ranking_daily (user_id, run_date, top_jobs_json, created_at, updated_at)\nSELECT\n  jm.user_id,\n  CURDATE(),\n  (\n    SELECT JSON_ARRAYAGG(\n      JSON_OBJECT('job_id', t.job_id, 'score', t.score, 'explanation', t.explanation)\n    )\n    FROM (\n      SELECT jm2.job_id, jm2.score, jm2.explanation\n      FROM job_matches jm2\n      WHERE jm2.user_id = jm.user_id\n        AND jm2.run_date = CURDATE()\n      ORDER BY jm2.score DESC, jm2.job_id DESC\n      LIMIT 5\n    ) t\n  ),\n  NOW(),\n  NOW()\nFROM job_matches jm\nWHERE jm.id = LAST_INSERT_ID()\nON DUPLICATE KEY UPDATE\n  top_jobs_json = VALUES(top_jobs_json),\n  updated_at = VALUES(updated_at)",
+        "options": {}
+      },
+      "id": "8ce7676e-3020-4a65-a6b5-5814f8cc96cc",
+      "name": "Guardar ranking",
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.5,
+      "position": [
+        1584,
+        1200
+      ],
+      "credentials": {
+        "mySql": {
+          "id": "d3hob99pd8ZamK2v",
+          "name": "MySQL account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT\n  rd.user_id,\n  rd.run_date,\n  jt.job_id,\n  j.title,\n  j.company,\n  j.city,\n  jt.score,\n  jt.explanation\nFROM (\n  SELECT *\n  FROM ranking_daily\n  WHERE run_date = CURDATE()\n  ORDER BY updated_at DESC\n  LIMIT 1\n) rd\nJOIN JSON_TABLE(\n  rd.top_jobs_json,\n  '$[*]' COLUMNS (\n    job_id INT PATH '$.job_id',\n    score DECIMAL(6,2) PATH '$.score',\n    explanation VARCHAR(255) PATH '$.explanation'\n  )\n) jt\nJOIN jobs j ON j.id = jt.job_id\nORDER BY jt.score DESC, jt.job_id DESC",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.mySql",
+      "typeVersion": 2.5,
+      "position": [
+        1872,
+        1184
+      ],
+      "id": "355ea6dd-7585-4066-899d-fec2328fd61c",
+      "name": "Show",
+      "credentials": {
+        "mySql": {
+          "id": "d3hob99pd8ZamK2v",
+          "name": "MySQL account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Cron Diario": {
+      "main": [
+        [
+          {
+            "node": "Get Active Users",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Active Users": {
+      "main": [
+        [
+          {
+            "node": "Split In Batches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Split In Batches": {
+      "main": [
+        [
+          {
+            "node": "Get Profile Skilss",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Get Profile Skilss",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Profile Skilss": {
+      "main": [
+        [
+          {
+            "node": "Compute Top 5 matches (score + explicación)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Compute Top 5 matches (score + explicación)": {
+      "main": [
+        [
+          {
+            "node": "Insert results into job_matches",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Insert results into job_matches": {
+      "main": [
+        [
+          {
+            "node": "Guardar ranking",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Guardar ranking": {
+      "main": [
+        [
+          {
+            "node": "Show",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Show": {
+      "main": [
+        [
+          {
+            "node": "Get Profile Skilss",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate",
+    "availableInMCP": false
+  },
+  "versionId": "647b5402-1f93-4d2a-91d6-c313af14ac8c",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "978f51c65a4916b74d84044666884678b19aa1294cfbfc5170757bbbeca6c50d"
+  },
+  "id": "eIeLYajrj2ZlPY24",
+  "tags": []
+}
